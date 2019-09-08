@@ -23,6 +23,7 @@ import (
 var (
 	success = color.New(color.FgGreen)
 	fail    = color.New(color.FgHiRed)
+	ignore = true
 )
 
 const paletteEnv = "GOTEST_PALETTE"
@@ -40,6 +41,12 @@ func gotest(args []string) int {
 
 	r, w := io.Pipe()
 	defer w.Close()
+
+	for _,arg := range args {
+		if arg == "-v" {
+			ignore = false
+		}
+	}
 
 	args = append([]string{"test"}, args...)
 	cmd := exec.Command("go", args...)
@@ -84,6 +91,9 @@ func parse(line string) {
 		fallthrough
 	case strings.HasPrefix(trimmed, "?"):
 		c = nil
+		if ignore{
+			return
+		}
 
 	// success
 	case strings.HasPrefix(trimmed, "--- PASS"):
