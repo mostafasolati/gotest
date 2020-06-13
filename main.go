@@ -8,12 +8,12 @@ package main
 
 import (
 	"bufio"
-	"flag"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,19 +22,23 @@ import (
 )
 
 var (
-	success = color.New(color.FgGreen)
-	fail    = color.New(color.FgHiRed)
-	ignore = flag.Bool("ignore",false,"ignore packages with no test files")
+	pass       = color.FgGreen
+	skip       = color.FgYellow
+	fail       = color.FgHiRed
+	skipnotest bool
 )
 
-const paletteEnv = "GOTEST_PALETTE"
+const (
+	paletteEnv     = "GOTEST_PALETTE"
+	skipNoTestsEnv = "GOTEST_SKIPNOTESTS"
+)
 
 func main() {
-	flag.Parse()
-	setPalette()
+	enablePalette()
+	enableSkipNoTests()
 	enableOnCI()
-	fmt.Println("ignore:",*ignore)
-	os.Exit(gotest(os.Args[2:]))
+
+	os.Exit(gotest(os.Args[1:]))
 }
 
 func gotest(args []string) int {
@@ -52,6 +56,24 @@ func gotest(args []string) int {
 	cmd.Env = os.Environ()
 
 	go consume(&wg, r)
+
+	sigc := make(chan os.Signal)
+	done := make(chan struct{})
+	defer func() {
+		done <- struct{}{}
+	}()
+	signal.Notify(sigc)
+
+	go func() {
+		for {
+			select {
+			case sig := <-sigc:
+				cmd.Process.Signal(sig)
+			case <-done:
+				return
+			}
+		}
+	}()
 
 	if err := cmd.Run(); err != nil {
 		if ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok {
@@ -78,45 +100,44 @@ func consume(wg *sync.WaitGroup, r io.Reader) {
 	}
 }
 
-var c *color.Color
-
 func parse(line string) {
 	trimmed := strings.TrimSpace(line)
+	defer color.Unset()
 
+	var c color.Attribute
 	switch {
-	case strings.HasPrefix(trimmed, "=== RUN"):
-		fallthrough
-	case strings.HasPrefix(trimmed, "?"):
-		c = nil
-		if *ignore{
+	case strings.Contains(trimmed, "[no test files]"):
+		if skipnotest {
 			return
 		}
 
-	// success
-	case strings.HasPrefix(trimmed, "--- PASS"):
+	case strings.HasPrefix(trimmed, "--- PASS"): // passed
 		fallthrough
 	case strings.HasPrefix(trimmed, "ok"):
 		fallthrough
 	case strings.HasPrefix(trimmed, "PASS"):
-		c = success
+		c = pass
 
-	// failure
+	// skipped
+	case strings.HasPrefix(trimmed, "--- SKIP"):
+		c = skip
+
+	// failed
 	case strings.HasPrefix(trimmed, "--- FAIL"):
 		fallthrough
 	case strings.HasPrefix(trimmed, "FAIL"):
 		c = fail
 	}
 
-	if c == nil {
-		fmt.Printf("%s\n", line)
-		return
-	}
-	c.Printf("%s\n", line)
+	color.Set(c)
+	fmt.Printf("%s\n", line)
 }
 
 func enableOnCI() {
 	ci := strings.ToLower(os.Getenv("CI"))
 	switch ci {
+	case "true":
+		fallthrough
 	case "travis":
 		fallthrough
 	case "appveyor":
@@ -128,7 +149,7 @@ func enableOnCI() {
 	}
 }
 
-func setPalette() {
+func enablePalette() {
 	v := os.Getenv(paletteEnv)
 	if v == "" {
 		return
@@ -138,11 +159,20 @@ func setPalette() {
 		return
 	}
 	if c, ok := colors[vals[0]]; ok {
-		fail = color.New(c)
+		fail = c
 	}
 	if c, ok := colors[vals[1]]; ok {
-		success = color.New(c)
+		pass = c
 	}
+}
+
+func enableSkipNoTests() {
+	v := os.Getenv(skipNoTestsEnv)
+	if v == "" {
+		return
+	}
+	v = strings.ToLower(v)
+	skipnotest = v == "true"
 }
 
 var colors = map[string]color.Attribute{
